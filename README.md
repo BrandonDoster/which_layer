@@ -143,3 +143,7 @@ from stdin to simulate a keyboard.
 Releases: push a `v*` tag; `.github/workflows/release.yml` tests, builds, packages,
 attests and publishes. `build_firmware.ps1` builds QMK firmware in Docker (via WSL).
 `tools/icon.py` regenerates the icon from source art.
+
+## License
+
+[AGPL-3.0-or-later](LICENSE).
