@@ -1,8 +1,8 @@
 # Builds the Dos60S firmware inside the "Docker" WSL distro (QMK lives in its
 # Linux filesystem, ~/qmk_firmware, for full build speed) and copies the .hex
 # back to firmware\.
-# Usage: .\build_firmware.ps1 [keymap]    (default: socd)
-param([string]$Keymap = 'socd')
+# Usage: .\build_firmware.ps1 [keymap]    (default: default)
+param([string]$Keymap = 'default')
 $ErrorActionPreference = 'Stop'
 
 # Pinned build image (update deliberately: docker pull ghcr.io/qmk/qmk_cli,

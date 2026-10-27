@@ -477,14 +477,17 @@ mod tests {
 
     #[test]
     fn loads_the_dos60s_fixture() {
-        let l = load(&fixture(), "socd").unwrap();
+        let l = load(&fixture(), "default").unwrap();
         assert_eq!(l.name, "Dos60S");
         assert_eq!(l.usb, Some((0xBD01, 0x0001)));
         assert_eq!(l.keys.len(), 60);
         assert_eq!(l.layers.len(), 3);
-        // Thumb keys: rotated, 1.5u, matrix positions intact.
+        // Thumb keys: rotated, matrix positions intact.
         let thumb = l.keys.iter().find(|k| k.matrix == Some([4, 4])).unwrap();
-        assert_eq!((thumb.w, thumb.r, thumb.rx, thumb.ry), (1.5, 30.0, Some(4.0), Some(5.0)));
+        assert_eq!((thumb.w, thumb.r, thumb.rx, thumb.ry), (1.0, 30.0, Some(4.0), Some(5.0)));
+        // which_layer.json label for a keycode the built-in table doesn't know.
+        let socd = l.keys.iter().position(|k| k.matrix == Some([2, 2])).unwrap();
+        assert_eq!(l.label(0b100, socd), ("SOCD", true));
         let i = l.keys.iter().position(|k| k.matrix == Some([4, 5])).unwrap();
         assert_eq!(l.label(0b1, i), ("\\\nL2", true));
         // Layer 2: own key, transparent key falling through to base, which_layer.json name/colour.
@@ -496,15 +499,20 @@ mod tests {
 
     #[test]
     fn rejects_keymap_names_that_leave_the_keymaps_folder() {
-        for bad in ["../socd", "..", "a/b", "a\\b", ""] {
+        for bad in ["../default", "..", "a/b", "a\\b", ""] {
             assert!(load(&fixture(), bad).is_err(), "{bad:?}");
         }
     }
 
     #[test]
     fn lists_keymaps_default_first() {
-        let kb = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/qmk/keyboards/dosboards/dos60s");
-        assert_eq!(keymaps(&kb), ["default", "socd"]);
+        let kb = std::env::temp_dir().join(format!("which_layer_keymaps_{}", std::process::id()));
+        for name in ["zeta", "default", "alpha", "bad name"] {
+            fs::create_dir_all(kb.join("keymaps").join(name)).unwrap();
+        }
+        let found = keymaps(&kb);
+        let _ = fs::remove_dir_all(&kb); // our own temp files
+        assert_eq!(found, ["default", "alpha", "zeta"]);
         assert!(keymaps(&kb.join("nope")).is_empty());
     }
 

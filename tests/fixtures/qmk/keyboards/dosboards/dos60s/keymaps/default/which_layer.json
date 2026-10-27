@@ -1,5 +1,5 @@
 {
-  "labels": {},
+  "labels": { "SOCDTOG": "SOCD" },
   "layers": [
     { "name": "Base" },
     { "name": "Fn", "color": "#2563eb" },
