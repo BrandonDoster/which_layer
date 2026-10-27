@@ -1,5 +1,5 @@
 // Copyright 2026 Brandon Doster (@BrandonDoster)
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-2.0-or-later
 //
 // which_layer QMK community module: reports the layer state and on/off toggles
 // (Caps Lock, NKRO, SOCD, ...) over raw HID to the which_layer overlay

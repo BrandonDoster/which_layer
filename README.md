@@ -174,4 +174,6 @@ attests and publishes. `build_firmware.ps1` builds QMK firmware in Docker (via W
 
 ## License
 
-[AGPL-3.0-or-later](LICENSE).
+The app is [AGPL-3.0-or-later](LICENSE). The QMK module in
+[`qmk_module`](qmk_module) is [GPL-2.0-or-later](qmk_module/LICENSE), like QMK
+itself, so it can go into any QMK firmware.

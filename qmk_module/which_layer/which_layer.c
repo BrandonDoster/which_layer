@@ -1,5 +1,5 @@
 // Copyright 2026 Brandon Doster (@BrandonDoster)
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: GPL-2.0-or-later
 //
 // Protocol (32-byte raw HID reports, byte 0 = 0xAA):
 //   board -> host  [0xAA, 0x01, layer_state u32 LE]           on every layer change
