@@ -1,5 +1,6 @@
 use crate::qmk;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tiny_skia::{Point, Transform};
 
@@ -21,7 +22,31 @@ pub struct Layout {
     /// (VID, PID) from keyboard.json, used to find the board over raw HID.
     #[serde(skip)]
     pub usb: Option<(u16, u16)>,
+    /// On/off states the firmware reports (Caps Lock, SOCD, ...), by bit.
+    #[serde(default)]
+    pub toggles: HashMap<u8, Toggle>,
 }
+
+/// How one firmware toggle is shown. Bits 0-4 have built-in names
+/// (`BUILTIN_TOGGLES`); bits 8-31 are free for the keymap's own.
+#[derive(Deserialize, Clone)]
+#[serde(default)]
+pub struct Toggle {
+    pub name: Option<String>,
+    /// Listed in the overlay's status line.
+    pub status: bool,
+    /// Pops up a big ON/OFF key when it changes.
+    pub popup: bool,
+}
+
+impl Default for Toggle {
+    fn default() -> Toggle {
+        Toggle { name: None, status: true, popup: true }
+    }
+}
+
+/// Names for the toggle bits the firmware snippet in the README reports.
+pub const BUILTIN_TOGGLES: [&str; 5] = ["Caps Lock", "Num Lock", "Scroll Lock", "NKRO", "SOCD"];
 
 #[derive(Deserialize)]
 pub struct Key {
@@ -144,7 +169,39 @@ impl Layout {
                 truncate(label);
             }
         }
+        if let Some(bit) = self.toggles.keys().find(|&&b| b >= 32) {
+            return Err(format!("toggle {bit}: bits are 0-31"));
+        }
+        for name in self.toggles.values_mut().filter_map(|t| t.name.as_mut()) {
+            truncate(name);
+        }
         Ok(())
+    }
+
+    pub fn toggle_name(&self, bit: u32) -> String {
+        let named = self.toggles.get(&(bit as u8)).and_then(|t| t.name.clone());
+        named.or_else(|| BUILTIN_TOGGLES.get(bit as usize).map(|s| s.to_string())).unwrap_or(format!("Toggle {bit}"))
+    }
+
+    fn toggle(&self, bit: u32) -> Toggle {
+        self.toggles.get(&(bit as u8)).cloned().unwrap_or_default()
+    }
+
+    /// Status line: (name, on) for each toggle the firmware reports, lowest bit first.
+    pub fn status(&self, on: u32, known: u32) -> Vec<(String, bool)> {
+        (0..32)
+            .filter(|&b| known & (1 << b) != 0 && self.toggle(b).status)
+            .map(|b| (self.toggle_name(b), on & (1 << b) != 0))
+            .collect()
+    }
+
+    /// The toggle to pop up after a change from `old` to `new` ((on, known)
+    /// pairs): the highest changed bit that pops up. Bits the firmware only just
+    /// started reporting (connect) count as no change.
+    pub fn popup(&self, old: (u32, u32), new: (u32, u32)) -> Option<(String, bool)> {
+        let changed = (old.0 ^ new.0) & old.1 & new.1;
+        let bit = (0..32).rev().find(|&b| changed & (1 << b) != 0 && self.toggle(b).popup)?;
+        Some((self.toggle_name(bit), new.0 & (1 << bit) != 0))
     }
 
     /// Label for key `i` given QMK's `layer_state` bitmask (layer 0 always counts
@@ -205,6 +262,31 @@ mod tests {
                 { "name": "One",  "labels": ["1", null] },
                 { "name": "Two",  "labels": [null, null] } ] }"#,
         )
+    }
+
+    #[test]
+    fn toggles_status_and_popups() {
+        let mut l = layout(
+            r#"{ "name": "t", "keys": [{"x":0,"y":0}], "layers": [{ "name": "B", "labels": ["A"] }],
+                 "toggles": { "1": { "status": false }, "3": { "popup": false }, "9": { "name": "Game mode" } } }"#,
+        );
+        l.validate().unwrap();
+        let known = 0b10_0001_1011; // Caps, Num (status off), NKRO (no popup), SOCD, bit 9
+        assert_eq!(
+            l.status(0b10_0000_0001, known),
+            [("Caps Lock".into(), true), ("NKRO".into(), false), ("SOCD".into(), false), ("Game mode".into(), true)]
+        );
+        let s = |n: &str, on| Some((n.to_string(), on));
+        assert_eq!(l.popup((0, known), (0b1, known)), s("Caps Lock", true));
+        assert_eq!(l.popup((0b1, known), (0, known)), s("Caps Lock", false));
+        assert_eq!(l.popup((0, known), (0b1000, known)), None, "NKRO popup turned off");
+        assert_eq!(l.popup((0, known), (1 << 9 | 1, known)), s("Game mode", true), "highest changed bit");
+        assert_eq!(l.popup((0, 0), (0b1, known)), None, "connecting isn't a change");
+        assert_eq!(l.popup((0, known), (0b100, known)), None, "bit the firmware doesn't report");
+        assert_eq!(l.toggle_name(20), "Toggle 20");
+
+        let mut bad = layout(r#"{ "name": "t", "keys": [{"x":0,"y":0}], "layers": [{ "name": "B", "labels": [] }], "toggles": { "40": {} } }"#);
+        assert!(bad.validate().is_err());
     }
 
     #[test]

@@ -10,14 +10,16 @@
 //!     { "name": "Base" },
 //!     { "name": "Fn", "color": "#2563eb",
 //!       "keys": { "4,5": { "label": "Sym", "color": "#dc2626" } } }
-//!   ]
+//!   ],
+//!   "toggles": { "8": { "name": "Game mode" }, "3": { "popup": false } }
 //! }
 //! ```
 //! `labels` overrides a keycode everywhere; `keys` overrides one key (by matrix
 //! "row,col") on one layer. A layer's `color` fills the keys that layer defines.
+//! `toggles` names/hides the on/off states the firmware reports, by bit.
 
 use crate::keycodes;
-use crate::layout::{Key, Layer, Layout};
+use crate::layout::{Key, Layer, Layout, Toggle};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -57,6 +59,8 @@ struct Overrides {
     labels: HashMap<String, String>,
     #[serde(default)]
     layers: Vec<LayerOverride>,
+    #[serde(default)]
+    toggles: HashMap<u8, Toggle>,
 }
 
 #[derive(Deserialize)]
@@ -219,6 +223,7 @@ pub fn load(dir: &Path, keymap: &str) -> Result<Layout, String> {
         keys,
         layers,
         sources,
+        toggles: ov.toggles,
     })
 }
 

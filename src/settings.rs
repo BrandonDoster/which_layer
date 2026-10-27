@@ -21,6 +21,8 @@ pub struct Settings {
     pub fade_out_ms: u32,
     /// How long it stays fully visible after returning to Base before fading out.
     pub hide_delay_ms: u32,
+    /// How long a toggle popup (Caps Lock ON, ...) stays up. 0 = no popups.
+    pub popup_ms: u32,
     /// 0.2 ..= 1.0
     pub opacity: f32,
     /// "bottom" or "top" of the primary monitor.
@@ -45,6 +47,7 @@ impl Default for Settings {
             fade_in_ms: 60,
             fade_out_ms: 150,
             hide_delay_ms: 250,
+            popup_ms: 1000,
             opacity: 0.9,
             position: "bottom".into(),
             margin: 80,

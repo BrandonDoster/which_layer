@@ -18,7 +18,7 @@ mod window;
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use layout::Layout;
-use render::Renderer;
+use render::{Renderer, View};
 use settings::Settings;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -33,8 +33,8 @@ use winit::window::WindowId;
 /// How often the layout and settings files are checked for edits.
 const RELOAD_POLL: Duration = Duration::from_secs(1);
 
-const HELP: &str = "Simulated keyboard: <n> = switch to layer n, s = show, h = hide, \
-c = create window, d = destroy window, m = memory, q = quit";
+const HELP: &str = "Simulated keyboard: <n> = switch to layer n, t<n> = flip toggle bit n \
+(t0 = Caps Lock), s = show, h = hide, c = create window, d = destroy window, m = memory, q = quit";
 
 /// Events from the keyboard, tray, hotkey and (debug builds) the console simulator.
 pub enum Cmd {
@@ -42,6 +42,10 @@ pub enum Cmd {
     Layer(usize),
     /// Keyboard: QMK layer_state bitmask.
     LayerState(u32),
+    /// Keyboard: on/off toggles (Caps Lock, SOCD, ...) and which bits it reports.
+    Toggles { on: u32, known: u32 },
+    /// Simulator: flip one toggle bit.
+    FlipToggle(u32),
     Show,
     Hide,
     /// Tray icon click or hotkey.
@@ -66,6 +70,12 @@ pub struct App {
     dpi: f32,
     /// QMK layer_state bitmask; the highest set bit is the layer shown.
     state: u32,
+    /// Firmware toggles: (on, known) bitmasks.
+    toggles: (u32, u32),
+    /// The last toggle change to pop up: (name, on).
+    popup: Option<(String, bool)>,
+    /// What the window last showed: (keys, popup), to repaint when that changes.
+    painted: (bool, bool),
     overlay: Option<Overlay>,
     /// Decides when the overlay is on screen and how faded it is.
     vis: Visibility,
@@ -94,17 +104,31 @@ impl App {
         if self.overlay.is_some() {
             return;
         }
-        let (w, h) = Renderer::size(&self.layout, self.scale());
+        let (w, h) = self.size_of(&self.layout);
         let margin = (self.settings.margin as f32 * self.dpi) as i32;
         self.overlay = Some(Overlay::create(el, w, h, self.settings.position == "top", margin));
         self.paint(self.window_opacity);
     }
 
-    /// Renders the current layer into the window at `opacity`.
+    /// Overlay size for `layout`, with a status strip if it has toggles to list.
+    fn size_of(&self, layout: &Layout) -> (u32, u32) {
+        Renderer::size(layout, self.scale(), !layout.status(self.toggles.0, self.toggles.1).is_empty())
+    }
+
+    /// Wanted (keys, popup) drawing right now.
+    fn view(&self, now: Instant) -> (bool, bool) {
+        (self.vis.keys_visible(), self.popup.is_some() && self.vis.popup_visible(now))
+    }
+
+    /// Renders the current layer (and status, popup) into the window at `opacity`.
     fn paint(&mut self, opacity: f32) {
         let scale = self.scale();
+        let (keys, popup) = self.view(Instant::now());
+        self.painted = (keys, popup);
+        let status = self.layout.status(self.toggles.0, self.toggles.1);
+        let popup = self.popup.as_ref().filter(|_| popup).map(|(name, on)| (name.as_str(), *on));
         let Some(overlay) = &mut self.overlay else { return };
-        let pm = self.renderer.render(&self.layout, self.state, scale);
+        let pm = self.renderer.render(&self.layout, self.state, scale, View { keys, status: &status, popup });
         overlay.present(&pm, opacity);
     }
 
@@ -114,6 +138,8 @@ impl App {
         let opacity = self.settings.opacity * self.vis.alpha(now);
         match (self.vis.on_screen(), self.window_shown) {
             (true, false) => self.show_at(opacity),
+            // A popup came or went, or the keyboard left a lone popup.
+            (true, true) if self.view(now) != self.painted => self.paint(opacity),
             (true, true) if opacity != self.window_opacity => {
                 if let Some(o) = &self.overlay {
                     o.set_opacity(opacity);
@@ -181,6 +207,25 @@ impl App {
     fn set_state(&mut self, state: u32) {
         self.apply_state(state);
         self.vis.layer_state(state, Instant::now());
+    }
+
+    /// New toggle states from the keyboard: pop up what changed, and resize if
+    /// the status strip appears or goes (connect / disconnect).
+    fn set_toggles(&mut self, on: u32, known: u32, el: &ActiveEventLoop) {
+        let size = self.size_of(&self.layout);
+        let old = std::mem::replace(&mut self.toggles, (on, known));
+        if self.settings.popup_ms > 0 {
+            if let Some(p) = self.layout.popup(old, self.toggles) {
+                println!("toggle: {} {}", p.0, if p.1 { "on" } else { "off" });
+                self.popup = Some(p);
+                self.vis.popup(Instant::now(), Duration::from_millis(self.settings.popup_ms as u64));
+            }
+        }
+        if self.size_of(&self.layout) != size {
+            self.rebuild_window(el);
+        } else if self.window_shown {
+            self.paint(self.window_opacity);
+        }
     }
 
     pub fn top_layer(&self) -> usize {
@@ -306,7 +351,7 @@ impl App {
         self.errors.layout = layout.as_ref().err().map(|e| format!("keeping previous layout: {e}"));
         self.show_errors();
         let Ok(layout) = layout else { return };
-        let resized = Renderer::size(&layout, self.scale()) != Renderer::size(&self.layout, self.scale());
+        let resized = self.size_of(&layout) != self.size_of(&self.layout);
         self.layout = layout;
         // A different board (VID/PID) is picked up on the HID thread's next scan.
         *self.hid_target.lock().unwrap_or_else(|e| e.into_inner()) = self.layout.usb;
@@ -438,6 +483,13 @@ impl ApplicationHandler<Cmd> for App {
         match cmd {
             Cmd::Layer(n) => self.set_state(1 << (n % self.layout.layers.len().min(32))),
             Cmd::LayerState(state) => self.set_state(state),
+            Cmd::Toggles { on, known } => self.set_toggles(on, known, el),
+            Cmd::FlipToggle(bit) => {
+                let (on, known) = self.toggles;
+                let b = 1 << (bit % 32);
+                // First flip of a bit just starts reporting it, like a connect.
+                self.set_toggles(if known & b != 0 { on ^ b } else { on }, known | b, el);
+            }
             Cmd::Show => self.vis.show(Instant::now()),
             Cmd::Hide => self.vis.hide(Instant::now(), false),
             Cmd::Toggle => self.toggle(el),
@@ -490,6 +542,10 @@ fn spawn_stdin(proxy: EventLoopProxy<Cmd>) {
                 "d" => Cmd::Destroy,
                 "m" => Cmd::Mem,
                 "q" => Cmd::Quit,
+                t if t.starts_with('t') => match t[1..].parse() {
+                    Ok(bit) => Cmd::FlipToggle(bit),
+                    Err(_) => continue,
+                },
                 t => match t.parse() {
                     Ok(n) => Cmd::Layer(n),
                     Err(_) => {
@@ -735,6 +791,9 @@ fn main() {
         renderer: Renderer::new().unwrap_or_else(|e| fail(&e)),
         dpi: 1.0,
         state: 1,
+        toggles: (0, 0),
+        popup: None,
+        painted: (true, false),
         overlay: None,
         window_shown: false,
         window_opacity: 0.0,

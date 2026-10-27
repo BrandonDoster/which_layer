@@ -6,6 +6,10 @@
 //! change first dwells on screen for `hide_delay`, then fades out; a manual
 //! hide skips the dwell. Anything that shows again mid-dwell or mid-fade picks
 //! up from the current opacity.
+//!
+//! A toggle popup (Caps Lock ON, ...) is drawn over the keyboard if that's on
+//! screen; otherwise it comes up alone ("popup only") for its duration. Leaving
+//! a layer while a popup is up keeps the popup, alone, until it's done.
 
 use std::time::{Duration, Instant};
 
@@ -50,11 +54,23 @@ pub struct Visibility {
     /// On screen because of a layer change rather than the user.
     auto_shown: bool,
     auto_hide_at: Option<Instant>,
+    popup_until: Option<Instant>,
+    /// On screen only for a popup: draw it without the keyboard.
+    popup_only: bool,
 }
 
 impl Visibility {
     pub fn new(timing: Timing, pinned: bool, auto_show: bool) -> Visibility {
-        let mut v = Visibility { phase: Phase::Hidden, timing, pinned, auto_show, auto_shown: false, auto_hide_at: None };
+        let mut v = Visibility {
+            phase: Phase::Hidden,
+            timing,
+            pinned,
+            auto_show,
+            auto_shown: false,
+            auto_hide_at: None,
+            popup_until: None,
+            popup_only: false,
+        };
         if pinned {
             v.phase = Phase::Shown;
         }
@@ -97,8 +113,38 @@ impl Visibility {
                 self.auto_hide_at = self.timing.auto_hide.map(|d| now + d);
             }
         } else if self.auto_shown {
-            self.hide(now, true);
+            match self.popup_until.filter(|&t| t > now) {
+                // Keep the popup up for its full time, without the keyboard.
+                Some(t) => {
+                    self.popup_only = true;
+                    self.auto_hide_at = Some(t);
+                }
+                None => self.hide(now, true),
+            }
         }
+    }
+
+    /// A toggle changed: show its popup for `duration`. Over the keyboard if
+    /// that's up (pinned, user-shown or a layer); else alone, then hides itself.
+    pub fn popup(&mut self, now: Instant, duration: Duration) {
+        let until = now + duration.min(MAX_DURATION);
+        self.popup_until = Some(until);
+        if !self.showing() || self.popup_only {
+            self.show(now);
+            self.popup_only = true;
+            self.auto_shown = true;
+            self.auto_hide_at = Some(until);
+        }
+    }
+
+    /// Draw the popup now (still timing, or fading out on its own).
+    pub fn popup_visible(&self, now: Instant) -> bool {
+        self.popup_only || self.popup_until.is_some_and(|t| t > now)
+    }
+
+    /// Draw the keyboard (false while only a popup is up).
+    pub fn keys_visible(&self) -> bool {
+        !self.popup_only
     }
 
     /// Tray click / hotkey.
@@ -126,6 +172,7 @@ impl Visibility {
     pub fn show(&mut self, now: Instant) {
         self.auto_shown = false;
         self.auto_hide_at = None;
+        self.popup_only = false;
         if !self.showing() {
             let from = self.alpha(now);
             self.phase = Phase::FadingIn { from, start: now };
@@ -172,10 +219,9 @@ impl Visibility {
             Phase::Dwell { until } => Some(until),
             Phase::Hidden | Phase::Shown => None,
         };
-        match (phase, self.auto_hide_at) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        // A popup over the keyboard needs a repaint when it ends.
+        let popup_end = self.popup_until.filter(|&t| t > now && self.on_screen());
+        [phase, self.auto_hide_at, popup_end].into_iter().flatten().min()
     }
 }
 
@@ -308,6 +354,49 @@ mod tests {
         v.layer_state(0b1, t0);
         assert!(!v.on_screen());
         assert_eq!(v.next_wake(t0), None);
+    }
+
+    #[test]
+    fn popup_alone_shows_then_hides_itself() {
+        let t0 = Instant::now();
+        let mut v = Visibility::new(timing(), false, true);
+        v.popup(t0, 1000 * MS);
+        assert!(v.showing() && !v.keys_visible() && v.popup_visible(t0));
+        v.tick(t0 + 999 * MS);
+        assert!(v.showing());
+        v.tick(t0 + 1000 * MS);
+        assert!(!v.showing() && v.on_screen(), "dwell then fade, like a layer");
+        assert!(v.popup_visible(t0 + 1100 * MS), "still drawn while fading out");
+        v.tick(t0 + 1500 * MS);
+        assert!(!v.on_screen());
+    }
+
+    #[test]
+    fn popup_over_the_keyboard_and_layer_changes() {
+        let t0 = Instant::now();
+        let mut v = Visibility::new(timing(), false, true);
+        v.layer_state(0b100, t0); // holding a layer...
+        v.popup(t0 + 10 * MS, 1000 * MS); // ...and toggling SOCD on it
+        assert!(v.keys_visible() && v.popup_visible(t0 + 10 * MS));
+        v.tick(t0 + 150 * MS); // faded in
+        assert_eq!(v.next_wake(t0 + 150 * MS), Some(t0 + 1010 * MS), "repaint when the popup ends");
+        v.layer_state(0b1, t0 + 200 * MS); // let go of the layer: popup stays, alone
+        assert!(v.showing() && !v.keys_visible());
+        v.tick(t0 + 1010 * MS);
+        assert!(!v.showing(), "then hides at the popup's end");
+
+        // A layer during a lone popup brings the keyboard back.
+        let t1 = t0 + 5000 * MS;
+        v.popup(t1, 1000 * MS);
+        v.layer_state(0b10, t1 + 100 * MS);
+        assert!(v.keys_visible() && v.popup_visible(t1 + 100 * MS));
+        assert!(!v.popup_visible(t1 + 1000 * MS), "popup over the keyboard ends on time");
+
+        // Pinned: the popup is just drawn on top; nothing hides.
+        let mut p = Visibility::new(timing(), true, true);
+        p.popup(t0, 1000 * MS);
+        p.tick(t0 + 2000 * MS);
+        assert!(p.showing() && p.keys_visible() && !p.popup_visible(t0 + 2000 * MS));
     }
 
     #[test]

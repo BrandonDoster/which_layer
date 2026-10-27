@@ -1,7 +1,9 @@
 //! Raw HID link to the keyboard, on QMK's raw HID interface (usage page
 //! 0xFF60, usage 0x61). Protocol, 32-byte reports with byte 0 = 0xAA:
 //!   board -> host  [0xAA, 0x01, layer_state as u32 little endian]  on every layer change
-//!   host -> board  [0xAA, 0x01]                                    request the current state
+//!   board -> host  [0xAA, 0x02, on as u32 LE, known as u32 LE]     toggles (Caps Lock, SOCD, ...)
+//!   host -> board  [0xAA, 0x01]                                    request the current state (both)
+//! `known` marks the toggle bits the firmware reports; see layout::BUILTIN_TOGGLES.
 
 use crate::Cmd;
 use hidapi::{HidApi, HidDevice};
@@ -13,6 +15,7 @@ const USAGE_PAGE: u16 = 0xFF60;
 const USAGE: u16 = 0x61;
 const MAGIC: u8 = 0xAA;
 const LAYER_STATE: u8 = 0x01;
+const TOGGLES: u8 = 0x02;
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Which board to look for: (VID, PID) from the layout, or None for "first QMK
@@ -42,8 +45,11 @@ pub fn spawn(proxy: EventLoopProxy<Cmd>, target: Target) {
                     return; // event loop is gone
                 }
                 println!("keyboard disconnected");
-                // Whatever layer was held when it went away is no longer held.
-                if proxy.send_event(Cmd::LayerState(0)).is_err() {
+                // Whatever layer was held when it went away is no longer held,
+                // and its toggles are no longer known.
+                if proxy.send_event(Cmd::LayerState(0)).is_err()
+                    || proxy.send_event(Cmd::Toggles { on: 0, known: 0 }).is_err()
+                {
                     return;
                 }
             } else if !waiting_logged {
@@ -80,19 +86,25 @@ fn request_state(dev: &HidDevice) {
 /// MIN_INTERVAL (latest wins), so a misbehaving device can't flood the UI.
 fn listen(dev: &HidDevice, proxy: &EventLoopProxy<Cmd>) -> bool {
     let mut buf = [0u8; 32];
-    let mut throttle = Throttle::default();
+    let mut layers = Throttle::default();
+    let mut toggles = Throttle::default();
     loop {
-        let timeout = throttle.wait(Instant::now()).map_or(1000, |d| d.as_millis().max(1) as i32);
+        let now = Instant::now();
+        let wait = [layers.wait(now), toggles.wait(now)].into_iter().flatten().min();
+        let timeout = wait.map_or(1000, |d| d.as_millis().max(1) as i32);
         match dev.read_timeout(&mut buf, timeout) {
-            Ok(n) => {
-                if let Some(state) = parse_report(&buf[..n.min(buf.len())]) {
-                    throttle.offer(state);
-                }
-            }
+            Ok(n) => match parse_report(&buf[..n.min(buf.len())]) {
+                Some(Report::Layer(state)) => layers.offer(state),
+                Some(Report::Toggles { on, known }) => toggles.offer((on, known)),
+                None => {}
+            },
             Err(_) => return true,
         }
-        if let Some(state) = throttle.take(Instant::now()) {
-            if proxy.send_event(Cmd::LayerState(state)).is_err() {
+        let now = Instant::now();
+        let layer = layers.take(now).map(Cmd::LayerState);
+        let toggle = toggles.take(now).map(|(on, known)| Cmd::Toggles { on, known });
+        for cmd in [layer, toggle].into_iter().flatten() {
+            if proxy.send_event(cmd).is_err() {
                 return false;
             }
         }
@@ -102,21 +114,26 @@ fn listen(dev: &HidDevice, proxy: &EventLoopProxy<Cmd>) -> bool {
 /// Forwarding interval cap: ~1 frame. Real layer changes are far slower.
 const MIN_INTERVAL: Duration = Duration::from_millis(8);
 
-/// Dedupes and rate-limits layer states coming off the device.
-#[derive(Default)]
-struct Throttle {
-    sent: Option<u32>,
-    pending: Option<u32>,
+/// Dedupes and rate-limits one kind of report coming off the device.
+struct Throttle<T> {
+    sent: Option<T>,
+    pending: Option<T>,
     last_send: Option<Instant>,
 }
 
-impl Throttle {
-    fn offer(&mut self, state: u32) {
+impl<T> Default for Throttle<T> {
+    fn default() -> Self {
+        Throttle { sent: None, pending: None, last_send: None }
+    }
+}
+
+impl<T: Copy + PartialEq> Throttle<T> {
+    fn offer(&mut self, state: T) {
         self.pending = (Some(state) != self.sent).then_some(state);
     }
 
     /// The state to forward now, if any.
-    fn take(&mut self, now: Instant) -> Option<u32> {
+    fn take(&mut self, now: Instant) -> Option<T> {
         if self.wait(now).is_some_and(|d| !d.is_zero()) {
             return None;
         }
@@ -134,10 +151,18 @@ impl Throttle {
     }
 }
 
-/// The layer_state carried by one of our reports; anything else is ignored.
-fn parse_report(report: &[u8]) -> Option<u32> {
+#[derive(Debug, PartialEq)]
+enum Report {
+    Layer(u32),
+    Toggles { on: u32, known: u32 },
+}
+
+/// One of our reports; anything else is ignored.
+fn parse_report(report: &[u8]) -> Option<Report> {
+    let le = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
     match report {
-        [MAGIC, LAYER_STATE, a, b, c, d, ..] => Some(u32::from_le_bytes([*a, *b, *c, *d])),
+        [MAGIC, LAYER_STATE, s @ ..] if s.len() >= 4 => Some(Report::Layer(le(s))),
+        [MAGIC, TOGGLES, s @ ..] if s.len() >= 8 => Some(Report::Toggles { on: le(s), known: le(&s[4..]) }),
         _ => None,
     }
 }
@@ -168,11 +193,16 @@ mod tests {
 
     #[test]
     fn reports() {
-        assert_eq!(parse_report(&[0xAA, 0x01, 0b100, 0, 0, 0]), Some(0b100));
-        assert_eq!(parse_report(&[0xAA, 0x01, 0x78, 0x56, 0x34, 0x12, 9, 9]), Some(0x1234_5678));
+        assert_eq!(parse_report(&[0xAA, 0x01, 0b100, 0, 0, 0]), Some(Report::Layer(0b100)));
+        assert_eq!(parse_report(&[0xAA, 0x01, 0x78, 0x56, 0x34, 0x12, 9, 9]), Some(Report::Layer(0x1234_5678)));
         assert_eq!(parse_report(&[0xAA, 0x01, 1, 0, 0]), None, "too short");
         assert_eq!(parse_report(&[0xAB, 0x01, 1, 0, 0, 0]), None, "wrong magic");
-        assert_eq!(parse_report(&[0xAA, 0x02, 1, 0, 0, 0]), None, "unknown type");
+        assert_eq!(
+            parse_report(&[0xAA, 0x02, 0b1, 0, 0, 0, 0b11001, 0, 0, 0, 7]),
+            Some(Report::Toggles { on: 0b1, known: 0b11001 })
+        );
+        assert_eq!(parse_report(&[0xAA, 0x02, 1, 0, 0, 0, 1, 0, 0]), None, "toggles too short");
+        assert_eq!(parse_report(&[0xAA, 0x03, 1, 0, 0, 0, 1, 0, 0, 0]), None, "unknown type");
         assert_eq!(parse_report(&[]), None);
     }
 }
