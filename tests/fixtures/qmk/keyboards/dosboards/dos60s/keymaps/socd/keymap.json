@@ -1,0 +1,8 @@
+{
+  "modules": ["getreuer/socd_cleaner"],
+  "config": {
+    "features": {
+      "raw": true
+    }
+  }
+}

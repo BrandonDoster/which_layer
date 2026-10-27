@@ -1,0 +1,9 @@
+{
+  "labels": {},
+  "layers": [
+    { "name": "Base" },
+    { "name": "Fn", "color": "#2563eb" },
+    { "name": "Symbols / Nav", "color": "#b45309",
+      "keys": { "4,5": { "color": "#dc2626" } } }
+  ]
+}
