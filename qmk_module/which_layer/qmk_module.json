@@ -1,0 +1,9 @@
+{
+    "module_name": "which_layer",
+    "maintainer": "BrandonDoster",
+    "license": "AGPL-3.0-or-later",
+    "url": "https://github.com/BrandonDoster/which_layer",
+    "features": {
+        "raw": true
+    }
+}

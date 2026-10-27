@@ -19,11 +19,14 @@ if ($PSScriptRoot -notmatch '^[A-Za-z0-9 _.:\\-]+$') {
 # needs a shell, which is why the path is allow-listed above.
 $root = $PSScriptRoot.Replace('\', '/')
 $src = wsl -d Docker --exec wslpath -a "$root/firmware/Dos60S/QMK/dosboards"
+$mod = wsl -d Docker --exec wslpath -a "$root/qmk_module"
 $out = wsl -d Docker --exec wslpath -a "$root/firmware"
 $hex = "dosboards_dos60s_$Keymap.hex"
 
 $steps = @(
     "cp -rT '$src' ~/qmk_firmware/keyboards/dosboards"
+    # The which_layer community module, as "brandondoster/which_layer".
+    "mkdir -p ~/qmk_firmware/modules/brandondoster && cp -rT '$mod' ~/qmk_firmware/modules/brandondoster"
     "docker run --rm --user `$(id -u):`$(id -g) -v ~/qmk_firmware:/qmk_firmware -w /qmk_firmware -e MAKEFLAGS=-j`$(nproc) $image make dosboards/dos60s:$Keymap"
     "cp ~/qmk_firmware/$hex '$out/'"
 )

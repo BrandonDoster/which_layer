@@ -39,74 +39,58 @@ another, open the settings file from the tray and change the keymap name.
 
 The overlay listens over QMK raw HID for the layer state and for on/off
 toggles like Caps Lock, NKRO and SOCD. Boards without indicator LEDs get a big
-ON/OFF popup when one changes, and a status line under the keys. Enable raw HID
-in your keymap's `rules.mk` (`RAW_ENABLE = yes`) or `keymap.json`
-(`"config": {"features": {"raw": true}}`), and add this to `keymap.c`:
+ON/OFF popup when one changes, and a status line under the keys.
+
+Add it to any existing QMK keymap with the bundled community module (needs a
+QMK with community modules API 1.1.0, i.e. 2025 or newer), without touching `keymap.c`:
+
+1. Put [`qmk_module`](qmk_module) where QMK finds modules, as `brandondoster`:
+
+    ```sh
+    git clone https://github.com/BrandonDoster/which_layer
+    ln -s "$(pwd)/which_layer/qmk_module" ~/qmk_firmware/modules/brandondoster
+    ```
+
+2. Add it to your keymap's `keymap.json` (create the file next to `keymap.c` if
+   there isn't one; the two work together):
+
+    ```json
+    { "modules": ["brandondoster/which_layer"] }
+    ```
+
+3. Build and flash as usual. The module turns on raw HID itself.
+
+It reports Caps Lock and NKRO (when the build has NKRO), and SOCD when getreuer's
+`socd_cleaner` module is in the build too. Optional settings for your `config.h`:
+
+| Define | |
+|---|---|
+| `WHICH_LAYER_TOGGLES` | Built-in toggles to report, e.g. `(WHICH_LAYER_CAPS \| WHICH_LAYER_NUM)` |
+| `WHICH_LAYER_NO_RAW_HID_RECEIVE` | Your keymap has its own `raw_hid_receive` (see below) |
+| `WHICH_LAYER_RESEND_MS` | Resend interval when the module can't answer requests (default 1000) |
+
+Toggles of your own (a game mode, a custom flag) use bits 8-31 and get their
+names from `which_layer.json`. Report them from `keymap.c`:
 
 ```c
-#include "raw_hid.h"
+#include "which_layer.h"
 
-#define WL_REPORT_SIZE 32 // QMK raw HID report size
-#define WL_MAGIC 0xAA
-#define WL_LAYER_STATE 0x01
-#define WL_TOGGLES 0x02
-
-// Toggle bits which_layer names on its own (bits 8-31 are free for your own,
-// named in which_layer.json). WL_KNOWN is what this board reports.
-#define WL_CAPS (1UL << 0)
-#define WL_NUM (1UL << 1)
-#define WL_SCROLL (1UL << 2)
-#define WL_NKRO (1UL << 3)
-#define WL_SOCD (1UL << 4)
-#define WL_KNOWN (WL_CAPS | WL_NKRO)
-
-static void wl_send(uint8_t type, uint32_t a, uint32_t b) {
-    uint8_t report[WL_REPORT_SIZE] = {WL_MAGIC, type};
-    memcpy(&report[2], &a, sizeof(a));
-    memcpy(&report[6], &b, sizeof(b));
-    raw_hid_send(report, sizeof(report));
-}
-
-static uint32_t wl_toggles(void) {
-    return (host_keyboard_led_state().caps_lock ? WL_CAPS : 0) | (keymap_config.nkro ? WL_NKRO : 0);
-}
-
-layer_state_t layer_state_set_user(layer_state_t state) {
-    wl_send(WL_LAYER_STATE, state, 0);
-    return state;
-}
-
-// Toggles change from many places (host LEDs, keycodes), so watch for changes.
-void housekeeping_task_user(void) {
-    static uint32_t last = UINT32_MAX;
-    if (!is_keyboard_master()) {
-        return;
-    }
-    uint32_t now = wl_toggles();
-    if (now != last) {
-        last = now;
-        wl_send(WL_TOGGLES, now, WL_KNOWN);
-    }
-}
-
-// The overlay asks for the current state when it connects.
-void raw_hid_receive(uint8_t *data, uint8_t length) {
-    if (length >= 2 && data[0] == WL_MAGIC && data[1] == WL_LAYER_STATE) {
-        wl_send(WL_LAYER_STATE, layer_state, 0);
-        wl_send(WL_TOGGLES, wl_toggles(), WL_KNOWN);
-    }
+void which_layer_toggles_user(uint32_t *on, uint32_t *known) {
+    *known |= 1UL << 8;
+    if (game_mode) *on |= 1UL << 8;
 }
 ```
 
-Report only what your board has: add a bit to `WL_KNOWN` and to `wl_toggles()`.
-For example, with getreuer's `socd_cleaner` module, add `WL_SOCD` to `WL_KNOWN` and
-`| (socd_cleaner_enabled ? WL_SOCD : 0)` to `wl_toggles()`. Toggles of your own
-(a game mode, a custom flag) use bits 8-31 and get their names from `which_layer.json`.
+**VIA, or your own `raw_hid_receive`:** only one piece of code can own
+`raw_hid_receive`. With VIA the module steps aside automatically; with a handler
+of your own, define `WHICH_LAYER_NO_RAW_HID_RECEIVE` (otherwise the build stops
+with a "multiple definition of raw_hid_receive" error). Either way the module
+then resends the state every second, so a newly started overlay catches up within
+a second. For an instant answer, call `which_layer_raw_hid_receive(data, length)`
+first in your handler (or in `via_command_kb` with VIA); it returns true for
+which_layer's reports.
 
-If your keymap already defines `layer_state_set_user`, `housekeeping_task_user`
-or `raw_hid_receive` (VIA does the last), merge these into them.
-
-Without the firmware change the overlay still works from the tray or hotkey,
+Without the firmware side the overlay still works from the tray or hotkey,
 it just can't follow your layers or toggles.
 ## Customising
 
