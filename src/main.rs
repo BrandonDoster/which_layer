@@ -334,12 +334,21 @@ impl App {
             return;
         }
         self.stamps = current;
+        let deleted = !Settings::path().exists();
         match Settings::load() {
-            Ok(s) if s != self.settings => {
+            Ok(mut s) => {
+                // Deleting the file resets the settings, but not the keyboard.
+                if deleted {
+                    s.layout = self.settings.layout.clone();
+                }
                 self.errors.settings = None;
-                self.update_settings(s, el);
+                if s != self.settings {
+                    self.update_settings(s, el); // saves, which recreates the file
+                }
+                if deleted {
+                    self.errors.settings = self.settings.create_if_missing().err();
+                }
             }
-            Ok(_) => self.errors.settings = None,
             Err(e) => self.errors.settings = Some(e),
         }
         // The layout follows settings: a fixed settings.json, or a second launch
@@ -769,6 +778,10 @@ fn main() {
         } else if args != settings.layout && errors.settings.is_none() {
             settings.layout = args.clone();
             errors.settings = settings.save().err();
+        }
+        // First run (picker cancelled too): write every option out to edit.
+        if errors.settings.is_none() {
+            errors.settings = settings.create_if_missing().err();
         }
     }
     let layout = load_layout(&args).unwrap_or_else(|e| fail(&e));
