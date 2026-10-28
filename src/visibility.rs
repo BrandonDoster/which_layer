@@ -2,6 +2,10 @@
 //! the app feeds it events and the current time, then mirrors `on_screen()`
 //! and `alpha()` onto the real window, and sleeps until `next_wake()`.
 //!
+//! A layer can be required to be held for `show_delay` before the overlay comes
+//! up, so quick taps to a key you already know don't flash it; once it's on
+//! screen, further layer changes show at once.
+//!
 //! Showing fades in quickly (never jumpy, never laggy). Hiding after a layer
 //! change first dwells on screen for `hide_delay`, then fades out; a manual
 //! hide skips the dwell. Anything that shows again mid-dwell or mid-fade picks
@@ -20,6 +24,8 @@ const MAX_DURATION: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Timing {
+    /// How long a layer must be held before the overlay appears for it.
+    pub show_delay: Duration,
     pub fade_in: Duration,
     pub fade_out: Duration,
     /// Dwell before an automatic fade-out starts.
@@ -29,11 +35,17 @@ pub struct Timing {
 }
 
 impl Timing {
-    pub fn from_millis(fade_in: u32, fade_out: u32, hide_delay: u32, auto_hide_secs: f32) -> Timing {
+    pub fn from_millis(show_delay: u32, fade_in: u32, fade_out: u32, hide_delay: u32, auto_hide_secs: f32) -> Timing {
         let ms = |v: u32| Duration::from_millis(v as u64).min(MAX_DURATION);
         let auto_hide = (auto_hide_secs.is_finite() && auto_hide_secs > 0.0)
             .then(|| Duration::from_secs_f32(auto_hide_secs.min(3600.0)));
-        Timing { fade_in: ms(fade_in), fade_out: ms(fade_out), hide_delay: ms(hide_delay), auto_hide }
+        Timing {
+            show_delay: ms(show_delay),
+            fade_in: ms(fade_in),
+            fade_out: ms(fade_out),
+            hide_delay: ms(hide_delay),
+            auto_hide,
+        }
     }
 }
 
@@ -54,6 +66,8 @@ pub struct Visibility {
     /// On screen because of a layer change rather than the user.
     auto_shown: bool,
     auto_hide_at: Option<Instant>,
+    /// A layer is held but `show_delay` hasn't passed yet.
+    show_at: Option<Instant>,
     popup_until: Option<Instant>,
     /// On screen only for a popup: draw it without the keyboard.
     popup_only: bool,
@@ -68,6 +82,7 @@ impl Visibility {
             auto_show,
             auto_shown: false,
             auto_hide_at: None,
+            show_at: None,
             popup_until: None,
             popup_only: false,
         };
@@ -108,11 +123,17 @@ impl Visibility {
         }
         if state > 1 {
             if self.auto_show && (!self.showing() || self.auto_shown) {
-                self.show(now);
-                self.auto_shown = true;
-                self.auto_hide_at = self.timing.auto_hide.map(|d| now + d);
+                // Already on screen (another layer, a popup, fading out): no wait.
+                if self.on_screen() || self.timing.show_delay.is_zero() {
+                    self.auto_show_now(now);
+                } else if self.show_at.is_none() {
+                    self.show_at = Some(now + self.timing.show_delay);
+                }
             }
-        } else if self.auto_shown {
+            return;
+        }
+        self.show_at = None; // let go before the delay: never shown
+        if self.auto_shown {
             match self.popup_until.filter(|&t| t > now) {
                 // Keep the popup up for its full time, without the keyboard.
                 Some(t) => {
@@ -122,6 +143,13 @@ impl Visibility {
                 None => self.hide(now, true),
             }
         }
+    }
+
+    /// Shows for a layer, as an automatic show (hides again on return to Base).
+    fn auto_show_now(&mut self, now: Instant) {
+        self.show(now);
+        self.auto_shown = true;
+        self.auto_hide_at = self.timing.auto_hide.map(|d| now + d);
     }
 
     /// A toggle changed: show its popup for `duration`. Over the keyboard if
@@ -172,6 +200,7 @@ impl Visibility {
     pub fn show(&mut self, now: Instant) {
         self.auto_shown = false;
         self.auto_hide_at = None;
+        self.show_at = None;
         self.popup_only = false;
         if !self.showing() {
             let from = self.alpha(now);
@@ -197,6 +226,12 @@ impl Visibility {
 
     /// Advances fades, dwell and the auto-hide timer to `now`.
     pub fn tick(&mut self, now: Instant) {
+        if self.show_at.is_some_and(|t| now >= t) {
+            self.show_at = None;
+            if self.auto_show && !self.pinned && (!self.showing() || self.auto_shown) {
+                self.auto_show_now(now);
+            }
+        }
         if self.auto_hide_at.is_some_and(|t| now >= t) {
             self.hide(now, true);
         }
@@ -221,7 +256,7 @@ impl Visibility {
         };
         // A popup over the keyboard needs a repaint when it ends.
         let popup_end = self.popup_until.filter(|&t| t > now && self.on_screen());
-        [phase, self.auto_hide_at, popup_end].into_iter().flatten().min()
+        [phase, self.auto_hide_at, popup_end, self.show_at].into_iter().flatten().min()
     }
 }
 
@@ -240,7 +275,7 @@ mod tests {
     const MS: Duration = Duration::from_millis(1);
 
     fn timing() -> Timing {
-        Timing::from_millis(100, 200, 300, 5.0)
+        Timing::from_millis(0, 100, 200, 300, 5.0)
     }
 
     fn approx(a: f32, b: f32) -> bool {
@@ -348,12 +383,50 @@ mod tests {
     #[test]
     fn zero_durations_are_instant() {
         let t0 = Instant::now();
-        let mut v = Visibility::new(Timing::from_millis(0, 0, 0, 0.0), false, true);
+        let mut v = Visibility::new(Timing::from_millis(0, 0, 0, 0, 0.0), false, true);
         v.layer_state(0b10, t0);
         assert!(approx(v.alpha(t0), 1.0));
         v.layer_state(0b1, t0);
         assert!(!v.on_screen());
         assert_eq!(v.next_wake(t0), None);
+    }
+
+    #[test]
+    fn show_delay_waits_for_a_held_layer() {
+        let t0 = Instant::now();
+        let mut v = Visibility::new(Timing::from_millis(400, 100, 200, 300, 5.0), false, true);
+
+        // Tapped through quickly: never shows.
+        v.layer_state(0b10, t0);
+        assert!(!v.on_screen());
+        assert_eq!(v.next_wake(t0), Some(t0 + 400 * MS), "wakes when the delay is up");
+        v.layer_state(0b1, t0 + 300 * MS);
+        v.tick(t0 + 500 * MS);
+        assert!(!v.on_screen(), "released before the delay");
+        assert_eq!(v.next_wake(t0 + 500 * MS), None);
+
+        // Held: shows once the delay passes, even across a layer change meanwhile.
+        let t1 = t0 + 1000 * MS;
+        v.layer_state(0b10, t1);
+        v.layer_state(0b110, t1 + 200 * MS);
+        v.tick(t1 + 399 * MS);
+        assert!(!v.on_screen());
+        v.tick(t1 + 400 * MS);
+        assert!(v.showing(), "delay counts from the first layer");
+        v.tick(t1 + 500 * MS);
+
+        // Already up: switching layers or coming back mid fade-out is instant.
+        v.layer_state(0b1, t1 + 1000 * MS); // dwell
+        v.layer_state(0b10, t1 + 1100 * MS);
+        assert!(v.showing(), "still on screen, so no second wait");
+
+        // Manual show and popups ignore the delay.
+        let mut m = Visibility::new(Timing::from_millis(400, 0, 0, 0, 0.0), false, true);
+        m.toggle(t0);
+        assert!(m.showing());
+        let mut p = Visibility::new(Timing::from_millis(400, 0, 0, 0, 0.0), false, true);
+        p.popup(t0, 1000 * MS);
+        assert!(p.showing());
     }
 
     #[test]
@@ -401,9 +474,9 @@ mod tests {
 
     #[test]
     fn absurd_timings_are_clamped() {
-        let t = Timing::from_millis(u32::MAX, u32::MAX, u32::MAX, f32::NAN);
-        assert_eq!(t.fade_in, MAX_DURATION);
+        let t = Timing::from_millis(u32::MAX, u32::MAX, u32::MAX, u32::MAX, f32::NAN);
+        assert_eq!((t.show_delay, t.fade_in), (MAX_DURATION, MAX_DURATION));
         assert_eq!(t.auto_hide, None);
-        assert_eq!(Timing::from_millis(0, 0, 0, -1.0).auto_hide, None);
+        assert_eq!(Timing::from_millis(0, 0, 0, 0, -1.0).auto_hide, None);
     }
 }

@@ -15,6 +15,9 @@ pub struct Settings {
     /// Hide an auto-shown overlay after this long even if the layer stays on
     /// (a toggled layer). 0 = only hide on return to Base.
     pub auto_hide_secs: f32,
+    /// Hold a layer this long before the overlay appears (0 = right away), so
+    /// quick taps to a key you already know don't flash it.
+    pub show_delay_ms: u32,
     /// Fade-in length when the overlay appears. Keep it short so it isn't laggy.
     pub fade_in_ms: u32,
     /// Fade-out length when it goes away.
@@ -44,6 +47,7 @@ impl Default for Settings {
             pinned: false,
             auto_show: true,
             auto_hide_secs: 5.0,
+            show_delay_ms: 0,
             fade_in_ms: 60,
             fade_out_ms: 150,
             hide_delay_ms: 250,
@@ -101,7 +105,18 @@ impl Settings {
     }
 
     pub fn timing(&self) -> Timing {
-        Timing::from_millis(self.fade_in_ms, self.fade_out_ms, self.hide_delay_ms, self.auto_hide_secs)
+        Timing::from_millis(self.show_delay_ms, self.fade_in_ms, self.fade_out_ms, self.hide_delay_ms, self.auto_hide_secs)
+    }
+
+    /// Writes the file, every setting included, if there isn't one yet (first
+    /// run, or it was deleted), so all options are there to see and edit.
+    /// Lines removed from an existing file just mean "default" and stay removed.
+    /// Ok(true) if it wrote the file.
+    pub fn create_if_missing(&self) -> Result<bool, String> {
+        if Self::path().exists() {
+            return Ok(false);
+        }
+        self.save().map(|_| true)
     }
 
     /// Writes to a temp file and renames it over the old one, so a crash or
@@ -160,10 +175,38 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_file_is_created_with_every_setting() {
+        // Settings::path() follows %APPDATA%; no other test reads it.
+        let dir = std::env::temp_dir().join(format!("which_layer_create_{}", std::process::id()));
+        std::env::set_var("APPDATA", &dir);
+        let path = Settings::path();
+        assert_eq!(Settings::default().create_if_missing(), Ok(true));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let written: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text).unwrap();
+        let all = serde_json::to_value(Settings::default()).unwrap();
+        assert_eq!(written.len(), all.as_object().unwrap().len(), "every field written: {text}");
+
+        // An existing file, even one with lines removed, is left as it is.
+        std::fs::write(&path, r#"{ "opacity": 0.5 }"#).unwrap();
+        assert_eq!(Settings::default().create_if_missing(), Ok(false));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{ "opacity": 0.5 }"#);
+        let _ = std::fs::remove_dir_all(&dir); // our own temp files
+    }
+
+    #[test]
     fn missing_fields_take_defaults() {
         let s = Settings::parse(r#"{ "pinned": true }"#).unwrap();
         assert!(s.pinned);
         assert_eq!(s.fade_in_ms, Settings::default().fade_in_ms);
+        assert_eq!(s.timing().show_delay, std::time::Duration::ZERO, "no delay unless asked for");
+    }
+
+    #[test]
+    fn timing_comes_from_the_settings() {
+        let s = Settings::parse(r#"{ "show_delay_ms": 300, "fade_in_ms": 40, "hide_delay_ms": 0, "auto_hide_secs": 0 }"#).unwrap();
+        let t = s.timing();
+        let ms = std::time::Duration::from_millis;
+        assert_eq!((t.show_delay, t.fade_in, t.hide_delay, t.auto_hide), (ms(300), ms(40), ms(0), None));
     }
 
     #[test]

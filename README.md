@@ -150,6 +150,7 @@ apply live. The tray covers most of these; the rest:
 | Setting | Default | |
 |---|---|---|
 | `hotkey` | `null` | e.g. `"Ctrl+Alt+L"` toggles the overlay |
+| `show_delay_ms` | 0 | Hold a layer this long before the overlay appears, so quick taps don't flash it (e.g. 300) |
 | `fade_in_ms` / `fade_out_ms` | 60 / 150 | Fade lengths |
 | `hide_delay_ms` | 250 | How long it stays after returning to base |
 | `auto_hide_secs` | 5 | Hide a toggled layer after this long (0 = never) |
